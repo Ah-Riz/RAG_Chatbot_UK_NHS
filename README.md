@@ -1,3 +1,14 @@
+---
+title: RAG Chatbot UK NHS
+emoji: 🏥
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 8501
+pinned: false
+short_description: UK NHS Long-term Plan RAG chatbot
+---
+
 # GENAI RAG Chatbot
 
 UK NHS Long-term Plan RAG chatbot (FastAPI + Streamlit) deployed as a Hugging Face Space.
