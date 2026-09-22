@@ -3,11 +3,11 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from sentence_transformers import SentenceTransformer
 from pydantic import BaseModel
-import requests
 import json
 import traceback
 import faiss
 from dotenv import load_dotenv
+from huggingface_hub import InferenceClient
 
 load_dotenv()
 
@@ -67,58 +67,47 @@ except Exception as e:
     rag_system = None
 
 HF_TOKEN = os.getenv("HF_TOKEN")
-API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3"
+HF_MODEL = os.getenv("HF_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 
 class Query(BaseModel):
     question: str
 
-def query_hf(payload):
+def query_hf(context: str, question: str):
     try:
-        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-        response = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-        
-        if response.status_code == 503:
-            return {"error": "Model is loading, please try again in a few minutes"}
-        
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.Timeout:
+        client = InferenceClient(token=HF_TOKEN)
+        completion = client.chat.completions.create(
+            model=HF_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Answer using ONLY the NHS/GOV documents provided.",
+                },
+                {
+                    "role": "user",
+                    "content": f"Documents:\n{context}\n\nQuestion: {question}",
+                },
+            ],
+            max_tokens=512,
+            temperature=0.7,
+        )
+        return completion
+    except TimeoutError:
         return {"error": "Request timeout"}
-    except requests.exceptions.RequestException as e:
-        return {"error": f"Request failed: {str(e)}"}
     except Exception as e:
-        return {"error": f"Unexpected error: {str(e)}"}
+        return {"error": f"Request failed: {str(e)}"}
 
 def extract_answer(response):
     try:
         if not response:
             return "No response received from AI model"
-        
+
         if isinstance(response, dict) and "error" in response:
             return f"AI model error: {response['error']}"
-        
-        generated_text = ""
-        
-        if isinstance(response, str):
-            generated_text = response
-        elif isinstance(response, dict):
-            generated_text = response.get("generated_text", "")
-        elif isinstance(response, list) and len(response) > 0:
-            first_item = response[0]
-            if isinstance(first_item, dict):
-                generated_text = first_item.get("generated_text", "")
-            elif isinstance(first_item, str):
-                generated_text = first_item
-        
-        if not generated_text:
+
+        content = getattr(getattr(response.choices[0], "message", None), "content", None)
+        if not content:
             return "No text generated"
-        
-        # Extract answer after "Answer:" delimiter
-        if "Answer:" in generated_text:
-            return generated_text.split("Answer:")[-1].strip()
-        else:
-            return generated_text.strip()
-            
+        return content.strip()
     except Exception as e:
         return f"Error processing response: {str(e)}"
 
@@ -168,23 +157,7 @@ async def ask(query: Query):
             context = "\n".join([f"Source: {doc.get('source', 'Unknown')}, Page: {doc.get('page', 'Unknown')}\n{doc.get('text', '')}" for doc in similar_docs])
             sources = [{"source": doc.get("source", "Unknown"), "page": doc.get("page", "Unknown")} for doc in similar_docs]
 
-        prompt = f"""Answer using ONLY the NHS/GOV documents below:
-        
-        {context}
-        
-        Question: {query.question}
-        Answer:"""
-        
-        # Query Hugging Face API
-        hf_response = query_hf({
-            "inputs": prompt, 
-            "parameters": {
-                "max_new_tokens": 512,
-                "temperature": 0.7,
-                "do_sample": True
-            }
-        })
-        
+        hf_response = query_hf(context, query.question)
         answer = extract_answer(hf_response)
         
         return {
